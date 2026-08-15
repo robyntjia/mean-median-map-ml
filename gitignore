@@ -1,0 +1,14 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Knit outputs (regenerate on demand; don't need to be versioned)
+*.html
+*.log
+*.aux
+
+# OS junk
+.DS_Store
+Thumbs.db

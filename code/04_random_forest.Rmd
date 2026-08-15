@@ -1,0 +1,329 @@
+---
+title: "Random Forest Analysis"
+author: "Justin"
+date: "2025-10-30"
+output: html_document
+---
+
+
+
+```{r Random_Forest_Model}
+# ===================================================================
+# ===== MODEL RANDOM FOREST (METODOLOGI OOB) - FINAL 70:20:10 SPLIT =====
+# ===================================================================
+# MAPPING:
+# 70% (Latih) -> rf_train_data
+# 20% (Uji)   -> rf_test_data
+# 10% (Validasi) -> rf_validation_data (Untuk konsistensi output)
+# ===================================================================
+
+# -------------------------------
+# 0. Load Library
+# -------------------------------
+packages <- c("randomForest", "caret", "ggplot2", "pROC", "dplyr", "tikzDevice")
+cat("Mengecek dan menginstall paket yang dibutuhkan...\n")
+for(pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    cat(sprintf("Paket '%s' tidak ditemukan. Menginstall...\n", pkg))
+    install.packages(pkg, dependencies = TRUE)
+  }
+  library(pkg, character.only = TRUE)
+}
+cat("Semua paket berhasil di-load.\n\n")
+
+set.seed(123) # reproduksibilitas
+
+# -------------------------------
+# 1. LOAD DATA DARI SKRIP REGRESI LOGISTIK
+# -------------------------------
+
+if(file.exists("Data_Skripsi_Fixed_8vars.RData")) {
+  load("Data_Skripsi_Fixed_8vars.RData")
+  cat("SUKSES: Data berhasil dimuat dari 'Data_Skripsi_Fixed_8vars.RData'.\n")
+  cat("Menerapkan proporsi: Latih (70%), Uji (20%), Validasi (10%)\n")
+} else {
+  stop("ERROR: File 'Data_Skripsi_Fixed_8vars.RData' tidak ditemukan.\nSilakan jalankan Chunk Regresi Logistik terlebih dahulu.")
+}
+
+# --- Mapping Variabel Sesuai Permintaan Latih:Uji:Validasi (70:20:10) ---
+rf_train_data      <- train_data_logreg # 70% (Latih)
+rf_test_data       <- test_data_logreg  # 20% (Uji Akhir)
+rf_validation_data <- val_data_logreg   # 10% (Validasi/Konsistensi Output)
+
+cat(sprintf("Data Latih (Train) : %d baris (70%%)\n", nrow(rf_train_data)))
+cat(sprintf("Data Uji (Test)    : %d baris (20%%)\n", nrow(rf_test_data)))
+cat(sprintf("Data Validasi (Val): %d baris (10%%)\n", nrow(rf_validation_data)))
+
+
+# -------------------------------
+# 2. Pastikan Target Adalah Faktor
+# -------------------------------
+levels_y <- sort(unique(rf_train_data$y))
+rf_train_data$y      <- factor(rf_train_data$y, levels = levels_y)
+rf_test_data$y       <- factor(rf_test_data$y, levels = levels_y)
+rf_validation_data$y <- factor(rf_validation_data$y, levels = levels_y)
+
+
+# -------------------------------
+# 3. Grid Search Menggunakan OOB Error + Parameter Tambahan
+# -------------------------------
+# Parameter yang akan di-tuning:
+# 1. ntree: Jumlah pohon
+# 2. mtry: Jumlah fitur acak per split
+# 3. nodesize (minsplit): Ukuran minimum node terminal
+# 4. maxnodes (maxdepth): Jumlah maksimum terminal node
+
+ntree_values <- c(100, 300, 500)
+
+# Menentukan mtry
+num_predictors <- ncol(rf_train_data) - 1 
+mtry_values_awal <- c(2, 3, 4) 
+mtry_values <- unique(mtry_values_awal[mtry_values_awal <= num_predictors])
+
+# Menentukan nodesize (mirip minsplit di DT)
+nodesize_values <- c(25, 50, 75) 
+
+# Menentukan maxnodes (mirip maxdepth di DT)
+maxnodes_values <- c(8,16,32) 
+
+results_df <- data.frame(
+  ntree = integer(),
+  mtry = integer(),
+  nodesize = integer(),
+  maxnodes = character(), 
+  OOB_Accuracy = double(),
+  OOB_F1 = double()
+)
+
+cat("\nMemulai Grid Search (menggunakan OOB Error pada Data Latih)...\n")
+
+total_iter <- length(ntree_values) * length(mtry_values) * length(nodesize_values) * length(maxnodes_values)
+iter_count <- 0
+
+for(nt in ntree_values){
+  for(mt in mtry_values){
+    for(ns in nodesize_values){
+      for(mn in maxnodes_values){
+        
+        iter_count <- iter_count + 1
+        # Handle maxnodes NULL
+        current_mn <- if(is.null(mn)) NULL else as.integer(mn)
+        mn_label <- if(is.null(mn)) "Unlimited" else as.character(mn)
+        
+        # Train Model
+        rf_model <- randomForest(y ~ ., data=rf_train_data, 
+                                 ntree=nt, 
+                                 mtry=mt, 
+                                 nodesize=ns, 
+                                 maxnodes=current_mn,
+                                 importance=FALSE) 
+        
+        # Ambil Confusion Matrix OOB
+        cm_oob <- rf_model$confusion
+        
+        if (nrow(cm_oob) < 2 || ncol(cm_oob) < 2) next
+
+        TN <- cm_oob[1, 1]
+        FP <- cm_oob[1, 2]
+        FN <- cm_oob[2, 1]
+        TP <- cm_oob[2, 2]
+        
+        acc  <- (TP + TN) / (TP + TN + FP + FN)
+        prec <- TP / (TP + FP)
+        rec  <- TP / (TP + FN)
+        f1   <- 2 * (prec * rec) / (prec + rec)
+        
+        # Handle NaN
+        acc  <- ifelse(is.nan(acc), 0, acc)
+        f1   <- ifelse(is.nan(f1), 0, f1)
+
+        results_df <- rbind(results_df, data.frame(
+          ntree = nt,
+          mtry = mt,
+          nodesize = ns,
+          maxnodes = mn_label,
+          OOB_Accuracy = round(acc, 4),
+          OOB_F1 = round(f1, 4)
+        ))
+      }
+    }
+  }
+}
+cat("Grid Search Selesai!\n\n")
+
+# Urutkan berdasarkan F1 lalu Accuracy
+results_df <- results_df[order(-results_df$OOB_F1, -results_df$OOB_Accuracy), ]
+print("Hasil Grid Search (Top 10 berdasarkan OOB):")
+print(head(results_df, 10))
+
+best_params <- results_df[1, ]
+cat(sprintf("\nKombinasi Terbaik (OOB):\nntree=%d, mtry=%d, nodesize=%d, maxnodes=%s\nOOB F1=%.4f, OOB Accuracy=%.4f\n",
+            best_params$ntree, best_params$mtry, best_params$nodesize, best_params$maxnodes, best_params$OOB_F1, best_params$OOB_Accuracy))
+
+
+# -------------------------------
+# 4. Latih Model Terbaik
+# -------------------------------
+cat("\nMelatih model terbaik menggunakan parameter optimal...\n")
+
+# Convert maxnodes label back to value
+final_mn <- if(best_params$maxnodes == "Unlimited") NULL else as.integer(best_params$maxnodes)
+
+best_model_rf <- randomForest(y ~ ., data=rf_train_data, 
+                              ntree=best_params$ntree, 
+                              mtry=best_params$mtry, 
+                              nodesize=best_params$nodesize,
+                              maxnodes=final_mn,
+                              importance=TRUE) # Hidupkan importance untuk plot akhir
+
+cat("\n--- Ringkasan Model Final (OOB Estimate) ---\n")
+print(best_model_rf)
+
+
+# ===================================================================
+# ===== FUNGSI EVALUASI (TERMASUK VALIDASI 10%) =====
+# ===================================================================
+evaluate_model_rf <- function(model, dataset, dataset_name="Data"){
+  positive_class <- as.character(levels_y[2])
+  
+  pred_class <- factor(predict(model, newdata=dataset, type="class"), levels=levels_y)
+  pred_prob <- predict(model, newdata=dataset, type="prob")[,positive_class]
+
+  # Confusion Matrix & Classification Report
+  cm <- confusionMatrix(pred_class, dataset$y, positive=positive_class)
+  cat(sprintf("\n--- Confusion Matrix & Classification Report: %s ---\n", dataset_name))
+  print(cm)
+  writeLines(capture.output(print(cm)), paste0("classification_report_RF_", dataset_name, ".txt"))
+  
+  # --- PLOT Heatmap CM ---
+  df_cm <- as.data.frame(table(Actual=dataset$y, Predicted=pred_class))
+  colnames(df_cm) <- c("Actual","Predicted","Count")
+  
+  p_cm <- ggplot(df_cm, aes(x=Predicted, y=Actual, fill=Count)) +
+    geom_tile(color="black") +
+    geom_text(aes(label=Count), color="white", size=6) +
+    scale_fill_gradient(low="lightblue", high="darkblue") +
+    labs(x="Kelas Prediksi", y="Kelas Aktual") + 
+    theme_minimal() +
+    theme(plot.title = element_blank(), legend.position = "none") 
+    
+  print(p_cm) 
+  ggsave(paste0("ConfusionMatrix_RF_", dataset_name, ".png"), p_cm, width=7, height=5, dpi=300)
+  
+  # Simpan ke TeX
+  tex_file_cm <- paste0("ConfusionMatrix_RF_", dataset_name, ".tex")
+  tryCatch({
+    tikz(file = tex_file_cm, width = 7, height = 5.5, verbose = FALSE)
+    print(p_cm) 
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # --- ROC & AUC ---
+  if (length(unique(dataset$y)) > 1) {
+    roc_curve <- roc(response=dataset$y, predictor=pred_prob, levels=levels_y, direction="<")
+    auc_val <- auc(roc_curve)
+    cat("AUC", dataset_name, ":", round(auc_val,4), "\n")
+    
+    # Plot ROC 
+    plot_title_roc <- ""
+    plot(roc_curve, main = plot_title_roc, col = "blue", lwd = 2, legacy.axes = TRUE)
+    abline(a = 0, b = 1, lty = 2, col = "red")
+    text(x=0.5, y=0.5, paste("AUC:", round(auc_val, 3)), col="blue", cex=1.2)
+    
+    # Simpan PNG
+    png_file <- paste0("ROC_RF_", dataset_name, ".png")
+    png(png_file, width=800, height=600)
+    plot(roc_curve, main = plot_title_roc, col = "blue", lwd = 2, legacy.axes = TRUE)
+    abline(a = 0, b = 1, lty = 2, col = "red")
+    text(x=0.5, y=0.5, paste("AUC:", round(auc_val, 3)), col="blue", cex=1.2)
+    dev.off()
+    
+    # Simpan TeX
+    tex_file <- paste0("ROC_RF_", dataset_name, ".tex")
+    tryCatch({
+      tikz(file = tex_file, width = 7, height = 5.5, verbose = FALSE)
+      plot(roc_curve, main = plot_title_roc, col = "blue", lwd = 2, legacy.axes = TRUE)
+      abline(a = 0, b = 1, lty = 2, col = "red")
+      text(x=0.5, y=0.5, paste("AUC:", round(auc_val, 3)), col="blue", cex=1.2)
+      dev.off()
+    }, error = function(e) { message(e) })
+    
+  } else {
+    cat("AUC tidak bisa dihitung (hanya 1 kelas di data", dataset_name, ")\n")
+  }
+}
+
+
+# -------------------------------
+# 5. Eksekusi Evaluasi
+# -------------------------------
+cat("\n\n--- MENGEVALUASI PADA DATA LATIH (70%) ---")
+evaluate_model_rf(best_model_rf, rf_train_data, "Train")
+
+cat("\n\n--- MENGEVALUASI PADA DATA VALIDASI (10%) ---")
+evaluate_model_rf(best_model_rf, rf_validation_data, "Validation")
+
+cat("\n\n--- MENGEVALUASI PADA DATA UJI (20%) ---")
+evaluate_model_rf(best_model_rf, rf_test_data, "Test")
+
+
+# -------------------------------
+# 6. Variable Importance (MODIFIKASI: Console + PNG)
+# -------------------------------
+cat("\n--- Variable Importance (Nilai Numerik) ---\n")
+
+# 1. Tampilkan Angka di Console
+imp_data <- importance(best_model_rf)
+print(imp_data)
+
+# 2. Simpan Angka ke CSV (Opsional, berguna untuk laporan)
+write.csv(imp_data, "Variable_Importance_Values.csv")
+
+cat("\n--- Membuat Plot Variable Importance ---\n")
+plot_title_imp <- ""
+
+# 3. Simpan PNG (Resolusi Tinggi)
+png("Variable_Importance_RF.png", width=1200, height=800, res=100)
+varImpPlot(best_model_rf, main = plot_title_imp)
+dev.off()
+cat("SUKSES: Plot Variable Importance disimpan sebagai 'Variable_Importance_RF.png'.\n")
+
+# 4. Simpan TeX (TikZ)
+cat("Menyimpan plot VarImp sebagai 'Variable_Importance_RF.tex'...\n")
+tryCatch({
+  tikz(file = "Variable_Importance_RF.tex", width = 7, height = 5.5, verbose = FALSE)
+  varImpPlot(best_model_rf, main = plot_title_imp)
+  dev.off()
+  cat("Plot .tex (TikZ) berhasil disimpan.\n")
+}, error = function(e) {
+  message("ERROR: Gagal menyimpan VarImp sebagai TikZ.")
+  message(e)
+  if(names(dev.cur()) == "tikz output") { dev.off() }
+})
+
+# 5. Tampilkan Plot di RStudio
+varImpPlot(best_model_rf, main = plot_title_imp)
+
+cat("Semua proses Random Forest selesai.\n")
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

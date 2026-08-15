@@ -1,0 +1,718 @@
+---
+title: "Regresi Logistik-Scriptshe"
+author: "Justin"
+date: "2025-10-30"
+output: html_document
+---
+```{r Data Regresi Logistik}
+# Muat library yang dibutuhkan
+library("rpart")
+library("corrplot")
+library(ggplot2)
+library(tidyr) 
+library(tikzDevice) 
+
+# ===================================================================
+# ===== SKRIP PRA-PEMROSESAN DAN SELEKSI FITUR (v2 - LENGKAP) =====
+# ===================================================================
+
+# Pastikan library dasar dimuat di awal chunk ini untuk mencegah error
+library(ggplot2)
+library(tidyr)     # <--- PENTING UNTUK pivot_longer
+library(tikzDevice)
+
+# --- FUNGSI BARU UNTUK MENAMPILKAN PERSAMAAN LOGIT ---
+print_logit_equation <- function(model, title) {
+  cat(paste("\n--- Persamaan Logit untuk:", title, "---\n"))
+  coeffs <- coef(model)
+  intercept <- coeffs["(Intercept)"]
+  predictors <- coeffs[names(coeffs) != "(Intercept)"]
+  eq_string <- "logit(p) = \\ln\\left(\\frac{p}{1-p}\\right) = "
+  eq_string <- paste0(eq_string, sprintf("%.4f", intercept))
+  if (length(predictors) > 0) {
+    for (i in 1:length(predictors)) {
+      var_name <- names(predictors)[i]
+      var_value <- predictors[i]
+      var_index <- gsub("x", "", var_name) 
+      sign <- ifelse(var_value >= 0, "+", "-")
+      value <- abs(var_value)
+      term <- sprintf(" %s %.4f x_{%s}", sign, value, var_index)
+      eq_string <- paste0(eq_string, term)
+    }
+  }
+  cat("\n--- Salin kode LaTeX berikut: ---\n")
+  cat("$$\n")
+  cat(eq_string, "\n") 
+  cat("$$\n")
+  cat("\n--- Daftar Koefisien (untuk referensi): ---\n")
+  print(round(coeffs, 6))
+  cat("---------------------------------------------\n")
+}
+# --- AKHIR FUNGSI BARU ---
+
+
+# ===================================================================
+# ===== [PERBAIKAN] ALUR A: PROSES DATA 12 VARS (UNTUK RM3) =====
+# ===================================================================
+cat("\n--- [PERBAIKAN] Memproses data_processed_12vars (12 prediktor) ---\n")
+
+if (!exists("data")) {
+  stop("ERROR: Objek 'data' (12 var) dari Chunk 1 tidak ditemukan.")
+}
+data_processed_12vars <- data # Ambil data asli dari Chunk 1
+
+# 2. Identifikasi SEMUA prediktor dan var skewed
+all_predictor_vars <- paste0("x", 1:12)
+all_skewed_vars <- c("x1", "x2", "x3", "x4", "x7", "x8", "x11", "x12")
+
+# 3. Terapkan log transform ke semua var skewed
+vars_to_log_12 <- intersect(all_skewed_vars, names(data_processed_12vars))
+data_processed_12vars[vars_to_log_12] <- log1p(data_processed_12vars[vars_to_log_12])
+
+# 4. Standardisasi SEMUA 12 prediktor
+data_processed_12vars[all_predictor_vars] <- as.data.frame(scale(data_processed_12vars[all_predictor_vars]))
+cat("--- Selesai memproses data_processed_12vars ---\n")
+# ===================================================================
+
+
+# ===================================================================
+# ===== [PERBAIKAN] ALUR B: PROSES DATA 8 VARS (UNTUK RM3 & RM4) =====
+# ===================================================================
+cat("\n--- [PERBAIKAN] Memproses data_processed_8vars (8 prediktor) ---\n")
+
+# 1. Pastikan 'data1' dari Chunk 1 sudah ada
+if (!exists("data1")) {
+  stop("ERROR: Objek 'data1' (8 var) dari Chunk 1 tidak ditemukan.")
+}
+
+# 2. Identifikasi kelompok var (HANYA untuk 8 var sisa)
+kelompok1_vars_8 <- c("x1", "x3", "x7", "x11") # Skewed yg tersisa
+kelompok2_vars_8 <- c("x5", "x6", "x9", "x10") # Normal yg tersisa
+dependent_var_8  <- "y"
+
+# 3. BUAT DATA FRAME BARU UNTUK DIPROSES (Menggunakan 'data1')
+data_processed_8vars <- data1 # <-- INI PERUBAHANNYA
+
+# 4. Terapkan Transformasi Logaritmik (log1p) HANYA ke Kelompok 1 (dari 8 var)
+cat("\n--- Menerapkan Log Transformasi ke Kelompok 1 (x1, x3, x7, x11) ---\n")
+data_processed_8vars[kelompok1_vars_8] <- log1p(data_processed_8vars[kelompok1_vars_8])
+cat("Log Transformasi selesai.\n")
+
+# 5. Lakukan standardisasi (scale) pada 8 var sisa
+predictor_vars_final_8 <- setdiff(names(data_processed_8vars), dependent_var_8)
+cat("\n--- Menerapkan Standardisasi (Z-Score) ke 8 prediktor ---\n")
+data_processed_8vars[predictor_vars_final_8] <- as.data.frame(scale(data_processed_8vars[predictor_vars_final_8]))
+cat("Standardisasi selesai.\n")
+
+# >>> KODE BARU TAMBAHAN: Pastikan y adalah faktor untuk plotting
+data_processed_8vars$y <- as.factor(data_processed_8vars$y)
+# <<< AKHIR KODE BARU TAMBAHAN
+
+# 6. Tampilkan 5 baris pertama (INI DATA UNTUK TABEL ANDA)
+cat("\n--- 5 Baris Pertama Data 8-Var Siap untuk Model ---\n")
+print(head(data_processed_8vars, 5))
+# ===================================================================
+
+
+# ===================================================================
+# ===== BLOK HISTOGRAM KETIGA (SEMUA 12 VAR, STANDARDIZED) =====
+# ===================================================================
+cat("\nMembuat histogram untuk SEMUA 12 data prediktor (x1-x12) yang distandardisasi...\n")
+all_predictors_data <- data[, paste0("x", 1:12)]
+all_skewed_vars <- c("x1", "x2", "x3", "x4", "x7", "x8", "x11", "x12")
+vars_to_log <- intersect(all_skewed_vars, names(all_predictors_data))
+all_predictors_data[vars_to_log] <- log1p(all_predictors_data[vars_to_log])
+all_predictors_data_std <- as.data.frame(scale(all_predictors_data))
+
+data_long_full_std <- pivot_longer(all_predictors_data_std,
+                                   cols = everything(),
+                                   names_to = "Variabel",
+                                   values_to = "Nilai")
+
+data_long_full_std$Variabel <- factor(data_long_full_std$Variabel, levels = paste0("x", 1:12))
+
+plot_hist_full_std <- ggplot(data_long_full_std, aes(x = Nilai)) +
+  geom_histogram(bins = 20, fill = "darkorange", color = "black", alpha = 0.8) +
+  facet_wrap(~ Variabel, scales = "free", ncol = 4) + 
+  labs(x = "Nilai Variabel",
+       y = "Frekuensi") +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+# === 1. TAMPILKAN DI CONSOLE ===
+print(plot_hist_full_std)
+
+# === 2. SIMPAN SEBAGAI .JPG ===
+cat("\nMenyimpan plot sebagai 'histogram_full_std.jpg'...\n")
+ggsave("histogram_full_std.jpg", plot_hist_full_std, width = 12, height = 9, dpi = 300)
+cat("Plot .jpg (full standar) berhasil disimpan.\n")
+
+# === 3. SIMPAN SEBAGAI .TEX ===
+cat("\nMenyimpan plot sebagai 'histogram_full_std.tex'...\n")
+tryCatch({
+  
+  # MEMBUKA 'device' TikZ secara manual
+  tikz(file = "histogram_full_std.tex", width = 10, height = 7.5, verbose = FALSE)
+  
+  # PENTING: 'print()' plot yang sudah Anda buat
+  print(plot_hist_full_std)
+  
+  # MENUTUP 'device' untuk menyelesaikan file
+  dev.off()
+  
+  cat("Plot .tex (TikZ - 12 Var Standar) berhasil disimpan.\n")
+  
+}, error = function(e) {
+  message("ERROR: Gagal menyimpan 'histogram_full_std' sebagai TikZ.")
+  message(e)
+  
+  # Pastikan device ditutup bahkan jika ada error
+  if(names(dev.cur()) == "tikz output") {
+    dev.off()
+  }
+})
+# ===================================================================
+# ===== AKHIR BLOK HISTOGRAM KETIGA =====
+# ===================================================================
+
+
+# ===================================================================
+# ===== KODE BOXPLOT DATA STANDARDISASI (SEMUA 12 VARIABEL) =====
+# ===================================================================
+# Tujuannya: Melihat distribusi outlier setelah data ditransformasi (Log + Scale).
+# Data dalam skala Z-score (Mean = 0, SD = 1).
+
+cat("\n--- Membuat Boxplot untuk Data 12 Variabel (Standardized) ---\n")
+
+# 1. Persiapkan Data (Replikasi proses transformasi agar data konsisten)
+box_data_raw <- data[, paste0("x", 1:12)]
+
+# Identifikasi variabel skewed
+vars_skewed_box <- c("x1", "x2", "x3", "x4", "x7", "x8", "x11", "x12")
+
+# a. Transformasi Log
+box_data_proc <- box_data_raw
+box_data_proc[vars_skewed_box] <- log1p(box_data_proc[vars_skewed_box])
+
+# b. Standardisasi (Z-Score)
+box_data_std <- as.data.frame(scale(box_data_proc))
+
+# 2. Ubah ke format Long untuk ggplot
+box_long_std <- pivot_longer(box_data_std,
+                             cols = everything(),
+                             names_to = "Variabel",
+                             values_to = "Nilai_Std")
+
+# 3. Atur urutan level agar plot urut (x1, x2, ..., x12)
+box_long_std$Variabel <- factor(box_long_std$Variabel, levels = paste0("x", 1:12))
+
+# 4. Buat Boxplot
+plot_box_std <- ggplot(box_long_std, aes(x = Variabel, y = Nilai_Std)) +
+  # Gunakan warna berbeda (misal lightgreen) agar beda dengan data asli
+  geom_boxplot(fill = "lightgreen", color = "black", 
+               outlier.colour = "red", outlier.shape = 16, alpha = 0.8) +
+  # Tambahkan garis horizontal di y=0 (Mean)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "blue", alpha = 0.5) +
+  labs(x = "Variabel",
+       y = "Nilai Standardisasi (Z-Score)") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold")
+  )
+
+# === 5. TAMPILKAN DI CONSOLE ===
+print(plot_box_std)
+
+# === 6. SIMPAN SEBAGAI .JPG ===
+cat("\nMenyimpan plot sebagai 'boxplot_std_12vars.jpg'...\n")
+ggsave("boxplot_std_12vars.jpg", plot_box_std, width = 10, height = 7, dpi = 300)
+cat("Plot .jpg berhasil disimpan.\n")
+
+# === 7. SIMPAN SEBAGAI .TEX (TikZ) ===
+cat("\nMenyimpan plot sebagai 'boxplot_std_12vars.tex'...\n")
+tryCatch({
+  # Buka device TikZ
+  tikz(file = "boxplot_std_12vars.tex", width = 8, height = 6, verbose = FALSE)
+  
+  # Print plot
+  print(plot_box_std)
+  
+  # Tutup device
+  dev.off()
+  cat("Plot .tex (TikZ - Boxplot Std) berhasil disimpan.\n")
+  
+}, error = function(e) {
+  message("ERROR: Gagal menyimpan 'boxplot_std_12vars' sebagai TikZ.")
+  message(e)
+  if(names(dev.cur()) == "tikz output") {
+    dev.off()
+  }
+})
+# ===================================================================
+
+# ===================================================================
+# ===== KODE BOXPLOT BARU: PERBANDINGAN KLASIFIKASI (8 VAR STANDAR) =====
+# ===================================================================
+cat("\n--- Membuat Boxplot 8 Var Terhadap Target (y) ---\n")
+
+# 1. Persiapan Data
+# Data yang digunakan: data_processed_8vars (8 Var, Log+Scale, y=Factor)
+if (!exists("data_processed_8vars")) stop("ERROR: data_processed_8vars tidak ditemukan.")
+
+# 2. Ubah ke format Long untuk ggplot
+vars_for_comparison <- setdiff(names(data_processed_8vars), c("x2", "x4", "x8", "x12"))
+data_for_compare <- data_processed_8vars[, vars_for_comparison]
+
+box_long_compare <- pivot_longer(data_for_compare,
+                                 cols = -y, # Semua kolom kecuali y
+                                 names_to = "Variabel",
+                                 values_to = "Nilai_Std")
+
+# 3. Atur urutan level agar plot urut
+ordered_vars <- c("x1", "x3", "x5", "x6", "x7", "x9", "x10", "x11")
+box_long_compare$Variabel <- factor(box_long_compare$Variabel, levels = ordered_vars)
+
+# 4. Buat Boxplot dengan pengelompokan (aes(x = y))
+plot_box_compare <- ggplot(box_long_compare, aes(x = y, y = Nilai_Std, fill = y)) +
+  geom_boxplot(outlier.colour = "red", outlier.shape = 16, alpha = 0.8) +
+  # Facet wrap untuk membagi per variabel prediktor
+  facet_wrap(~ Variabel, scales = "free_y", ncol = 4) +
+  labs(x = "Klasifikasi (y)",
+       y = "Nilai Standardisasi (Z-Score)",
+       fill = "Kelas y") +
+  scale_fill_manual(values = c("0" = "skyblue", "1" = "salmon")) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 10),
+    axis.text.x = element_text(size = 9, face = "bold"),
+    legend.position = "bottom"
+  )
+
+# === 5. TAMPILKAN DI CONSOLE ===
+print(plot_box_compare)
+
+# === 6. SIMPAN SEBAGAI .JPG ===
+cat("\nMenyimpan plot sebagai 'boxplot_y_vs_8vars_std.jpg'...\n")
+ggsave("boxplot_y_vs_8vars_std.jpg", plot_box_compare, width = 10, height = 7, dpi = 300)
+cat("Plot .jpg berhasil disimpan.\n")
+
+# === 7. SIMPAN SEBAGAI .TEX (TikZ) ===
+cat("\nMenyimpan plot sebagai 'boxplot_y_vs_8vars_std.tex'...\n")
+tryCatch({
+  # Buka device TikZ
+  tikz(file = "boxplot_y_vs_8vars_std.tex", width = 10, height = 7, verbose = FALSE)
+
+  # Print plot
+  print(plot_box_compare)
+
+  # Tutup device
+  dev.off()
+  cat("Plot .tex (TikZ - Boxplot vs Y) berhasil disimpan.\n")
+
+}, error = function(e) {
+  message("ERROR: Gagal menyimpan 'boxplot_y_vs_8vars_std' sebagai TikZ.")
+  message(e)
+  if(names(dev.cur()) == "tikz output") {
+    dev.off()
+  }
+})
+# ===================================================================
+
+# ===================================================================
+# ===== BAGIAN PEMODELAN AKHIR (UNTUK AIC SELECTION) =====
+# ===================================================================
+# Model ini dibuat PADA DATA 8-VARIABEL yang sudah diproses
+# (data_processed_8vars)
+
+cat("\n--- Menjalankan Model Penuh 8-Var (model_final_8vars) ---\n")
+model_final_8vars <- glm(y ~ ., data = data_processed_8vars, family = binomial)
+
+# 9. Lihat summary-nya.
+print(summary(model_final_8vars))
+
+# 9b. Tampilkan Persamaan Logit SEBELUM seleksi AIC
+print_logit_equation(model_final_8vars, "Model 8-Var (Sebelum Seleksi AIC)")
+
+
+# 10. Jalankan Seleksi Fitur (Stepwise AIC) pada model 8-var
+cat("\n--- Menjalankan Seleksi Fitur Stepwise (stepwise_final) ---\n")
+stepwise_final <- step(model_final_8vars, trace = 0) # trace = 0 agar tidak spam
+
+# 11. INILAH HASIL AKHIR AIC ANDA
+cat("\n--- HASIL AKHIR SELEKSI FITUR AIC (VALID) ---\n")
+print(summary(stepwise_final))
+
+# 11b. Tampilkan Persamaan Logit SETELAH seleksi AIC
+print_logit_equation(stepwise_final, "Model SETELAH Seleksi Fitur AIC (Final Model)")
+# ===================================================================
+
+# CATATAN:
+# model2, stepwise, dll. DIHAPUS dari chunk ini.
+# Pemodelan yang valid baru dimulai di CHUNK 2
+# SETELAH data 'data1' ini ditransformasi (log1p) dan distandardisasi (scale).
+# Variabel 'data1' akan otomatis digunakan oleh Chunk 2.
+```
+
+```{r}
+# ===================================================================
+# ===== INTEGRASI: PEMBAGIAN DATA & EVALUASI MODEL LENGKAP =====
+# ===================================================================
+
+# 1. Muat Library
+library(caret)
+library(pROC)
+library(ggplot2)
+library(tikzDevice)
+
+set.seed(123) # Seed utama
+
+# ===================================================================
+# ===== BAGIAN 1: PERSIAPAN DATA 12 VAR (UNTUK PERBANDINGAN RM3) =====
+# ===================================================================
+# Asumsi: 'data' (12 var original) sudah ada dari Chunk 1
+if (!exists("data")) stop("ERROR: Objek 'data' (12 var) tidak ditemukan.")
+
+# Proses Data 12 Var (Log + Scale) secara independen untuk baseline
+data_processed_12vars <- data
+vars_skewed_12 <- c("x1", "x2", "x3", "x4", "x7", "x8", "x11", "x12")
+data_processed_12vars[vars_skewed_12] <- log1p(data_processed_12vars[vars_skewed_12])
+data_processed_12vars[paste0("x", 1:12)] <- scale(data_processed_12vars[paste0("x", 1:12)])
+data_processed_12vars$y <- as.factor(data_processed_12vars$y)
+
+# Split Data 12 Var (Independen)
+set.seed(123)
+idx_test_12 <- createDataPartition(data_processed_12vars$y, p = 0.1, list = FALSE)
+test_data_12vars <- data_processed_12vars[idx_test_12, ]
+temp_data_12vars <- data_processed_12vars[-idx_test_12, ]
+
+set.seed(123)
+idx_val_12 <- createDataPartition(temp_data_12vars$y, p = (0.1/0.9), list = FALSE)
+validation_data_12vars <- temp_data_12vars[idx_val_12, ]
+train_data_12vars <- temp_data_12vars[-idx_val_12, ]
+
+cat("--- Konfirmasi Pembagian Data 12 Variabel ---\n")
+cat("Train:", nrow(train_data_12vars), "| Val:", nrow(validation_data_12vars), "| Test:", nrow(test_data_12vars), "\n\n")
+
+
+# ===================================================================
+# ===== BAGIAN 2: DATA 8 VAR (PUSAT DATA UNTUK SEMUA MODEL) =====
+# ===================================================================
+# [PERBAIKAN] Menerapkan Stratified Splitting berdasarkan y DAN perbedaan x5 vs x9
+
+# 1. Ambil Data 8 Variabel (data1 dari Chunk 1)
+if (!exists("data1")) stop("ERROR: Objek 'data1' (8 var) tidak ditemukan.")
+
+# Pastikan y adalah faktor
+data1$y <- as.factor(data1$y)
+
+# 2. [LOGIKA BARU] Buat Stratifikasi Khusus
+# Tujuannya: Memaksa baris yang x5 != x9 tersebar merata ke Train/Val/Test
+data1$is_diff <- ifelse(data1$x5 != data1$x9, "Beda", "Sama")
+data1$strata_group <- interaction(data1$y, data1$is_diff)
+
+cat("--- Statistik Perbedaan x5 vs x9 di Data Asli ---\n")
+print(table(data1$is_diff))
+
+# 3. Lakukan Splitting Berdasarkan 'strata_group'
+set.seed(123) 
+
+# A. Ambil Data Train (70%)
+idx_train <- createDataPartition(data1$strata_group, p = 0.7, list = FALSE)
+data_train_asli <- data1[idx_train, ]
+data_temp       <- data1[-idx_train, ]
+
+# B. Sisa 30% dibagi menjadi Validasi (10%) dan Test (20%)
+# Validasi adalah 1/3 dari sisa data (karena 10% dari total adalah 1/3 dari 30%)
+set.seed(123)
+idx_val <- createDataPartition(data_temp$strata_group, p = 1/3, list = FALSE) # 1/3 dari sisa
+
+data_val_asli  <- data_temp[idx_val, ]
+data_test_asli <- data_temp[-idx_val, ]
+
+# 4. BERSIHKAN KOLOM BANTUAN (PENTING!)
+# Kita harus menghapus kolom is_diff dan strata_group agar tidak masuk ke model
+hapus_kolom_bantu <- function(df) {
+  df$is_diff <- NULL
+  df$strata_group <- NULL
+  return(df)
+}
+
+data_train_asli <- hapus_kolom_bantu(data_train_asli)
+data_val_asli   <- hapus_kolom_bantu(data_val_asli)
+data_test_asli  <- hapus_kolom_bantu(data_test_asli)
+
+# 5. CEK ULANG (VERIFIKASI)
+cat("\n--- Verifikasi Distribusi 'Beda' (x5 != x9) ---\n")
+cat("Train :", sum(data_train_asli$x5 != data_train_asli$x9), "baris beda\n")
+cat("Val   :", sum(data_val_asli$x5 != data_val_asli$x9), "baris beda\n")
+cat("Test  :", sum(data_test_asli$x5 != data_test_asli$x9), "baris beda\n")
+
+# 6. SIMPAN Data Asli ini ke file .RData (Untuk dipakai DT dan RF nanti)
+save(data_train_asli, data_val_asli, data_test_asli, 
+     file = "Data_Skripsi_Fixed_8vars.RData")
+
+cat("\nSUKSES: Data asli (8 Var) disimpan ke 'Data_Skripsi_Fixed_8vars.RData'.\n")
+
+# 7. Transformasi Data untuk REGRESI LOGISTIK (Log + Scale)
+proses_logreg <- function(df_input) {
+  df <- df_input
+  # Log hanya untuk var skewed yang tersisa (x1, x3, x7, x11)
+  vars_skewed <- intersect(c("x1", "x3", "x7", "x11"), names(df))
+  if(length(vars_skewed) > 0) df[vars_skewed] <- log1p(df[vars_skewed])
+  
+  # Scale semua prediktor
+  vars_x <- setdiff(names(df), "y")
+  df[vars_x] <- scale(df[vars_x])
+  return(as.data.frame(df))
+}
+
+train_data_logreg <- proses_logreg(data_train_asli)
+val_data_logreg   <- proses_logreg(data_val_asli)
+test_data_logreg  <- proses_logreg(data_test_asli)
+
+cat("--- Konfirmasi Ukuran Data Akhir ---\n")
+cat("Train:", nrow(train_data_logreg), "| Val:", nrow(val_data_logreg), "| Test:", nrow(test_data_logreg), "\n")
+
+# ===================================================================
+# ===== BAGIAN 3: FUNGSI EVALUASI (Tetap Sama) =====
+# ===================================================================
+generate_model_evaluation <- function(model_formula, train_data, validation_data, test_data, file_suffix) {
+  
+  plot_title_suffix <- gsub("_", " ", file_suffix)
+  cat(paste("\n--- MELATIH MODEL DENGAN SUFFIX:", file_suffix, "---\n"))
+  
+  # 1. LATIH MODEL
+  model_latih <- glm(model_formula, data = train_data, family = binomial)
+  cat("\n--- Ringkasan Model (Data Latih) ---\n")
+  print(summary(model_latih))
+  
+  # 2. EVALUASI PADA DATA TES
+  cat(paste("\n--- EVALUASI DATA UJI", file_suffix, "---\n"))
+  prob_tes <- predict(model_latih, newdata = test_data, type = "response")
+  pred_tes <- ifelse(prob_tes > 0.5, 1, 0)
+  
+  pred_factor_tes <- factor(pred_tes, levels = c(0, 1))
+  actual_factor_tes <- factor(test_data$y, levels = c(0, 1))
+  report_tes <- confusionMatrix(data = pred_factor_tes, reference = actual_factor_tes, positive = "1")
+  
+  # Output CM Teks
+  print(report_tes) 
+  writeLines(capture.output(print(report_tes)), paste0("classification_report_tes", file_suffix, ".txt"))
+  
+  # Heatmap CM (Tes)
+  conf_tes <- table(Actual = test_data$y, Predicted = pred_tes)
+  cm_df_tes <- as.data.frame(conf_tes)
+  colnames(cm_df_tes) <- c("Actual", "Predicted", "Count")
+  
+  heatmap_tes <- ggplot(data = cm_df_tes, aes(x = Predicted, y = Actual, fill = Count)) +
+    geom_tile(color = "black") +
+    geom_text(aes(label = Count), vjust = 1, size = 6, color = "white") +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    labs(x = "Kelas Prediksi", y = "Kelas Aktual") +
+    theme_minimal() +
+    theme(plot.title = element_blank(), legend.position = "none")
+  
+  # MENAMPILKAN PLOT DI OUTPUT R/PLOT PANE
+  print(heatmap_tes) 
+  ggsave(paste0("confusion_matrix_tes", file_suffix, ".png"), heatmap_tes, width = 6, height = 5)
+  tryCatch({
+    tikz(file = paste0("confusion_matrix_tes", file_suffix, ".tex"), width = 7, height = 5.5)
+    print(heatmap_tes)
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # ROC (Tes)
+  roc_tes <- roc(response = test_data$y, predictor = prob_tes, levels = c(0, 1))
+  cat("\nAUC (Data Uji):", round(auc(roc_tes), 4), "\n")
+  png(paste0("roc_curve_plot_tes", file_suffix, ".png"), width = 800, height = 600)
+  plot(roc_tes, main = "", col = "blue", lwd = 2, print.auc = TRUE, legacy.axes = TRUE)
+  abline(a = 0, b = 1, lty = 2, col = "red")
+  dev.off()
+  tryCatch({
+    tikz(file = paste0("roc_curve_plot_tes", file_suffix, ".tex"), width = 7, height = 5.5)
+    plot(roc_tes, main = "", col = "blue", lwd = 2, print.auc = TRUE, legacy.axes = TRUE)
+    abline(a = 0, b = 1, lty = 2, col = "red")
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # 3. EVALUASI PADA DATA VALIDASI
+  cat(paste("\n--- EVALUASI DATA VALIDASI", file_suffix, "---\n"))
+  prob_val <- predict(model_latih, newdata = validation_data, type = "response")
+  pred_val <- ifelse(prob_val > 0.5, 1, 0)
+  
+  pred_factor_val <- factor(pred_val, levels = c(0, 1))
+  actual_factor_val <- factor(validation_data$y, levels = c(0, 1))
+  report_val <- confusionMatrix(data = pred_factor_val, reference = actual_factor_val, positive = "1")
+  
+  # Output CM Teks
+  print(report_val)
+  writeLines(capture.output(print(report_val)), paste0("classification_report_val", file_suffix, ".txt"))
+  
+  # Heatmap CM (Validasi)
+  conf_val <- table(Actual = validation_data$y, Predicted = pred_val)
+  cm_df_val <- as.data.frame(conf_val)
+  colnames(cm_df_val) <- c("Actual", "Predicted", "Count")
+  
+  heatmap_val <- ggplot(data = cm_df_val, aes(x = Predicted, y = Actual, fill = Count)) +
+    geom_tile(color = "black") +
+    geom_text(aes(label = Count), vjust = 1, size = 6, color = "white") +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    labs(x = "Kelas Prediksi", y = "Kelas Aktual") +
+    theme_minimal() +
+    theme(plot.title = element_blank(), legend.position = "none")
+  
+  # MENAMPILKAN PLOT DI OUTPUT R/PLOT PANE
+  print(heatmap_val)
+  ggsave(paste0("confusion_matrix_validasi", file_suffix, ".png"), heatmap_val, width = 6, height = 5)
+  tryCatch({
+    tikz(file = paste0("confusion_matrix_validasi", file_suffix, ".tex"), width = 7, height = 5.5)
+    print(heatmap_val)
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # ROC (Validasi)
+  roc_val <- roc(response = validation_data$y, predictor = prob_val, levels = c(0, 1))
+  cat("\nAUC (Data Validasi):", round(auc(roc_val), 4), "\n")
+  png(paste0("roc_curve_plot_validasi", file_suffix, ".png"), width = 800, height = 600)
+  plot(roc_val, main = "", col = "green4", lwd = 2, print.auc = TRUE, legacy.axes = TRUE)
+  abline(a = 0, b = 1, lty = 2, col = "red")
+  dev.off()
+  tryCatch({
+    tikz(file = paste0("roc_curve_plot_validasi", file_suffix, ".tex"), width = 7, height = 5.5)
+    plot(roc_val, main = "", col = "green4", lwd = 2, print.auc = TRUE, legacy.axes = TRUE)
+    abline(a = 0, b = 1, lty = 2, col = "red")
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # 4. EVALUASI PADA DATA LATIH (TRAIN)
+  cat(paste("\n--- EVALUASI DATA LATIH", file_suffix, "---\n"))
+  prob_latih <- predict(model_latih, newdata = train_data, type = "response")
+  pred_latih <- ifelse(prob_latih > 0.5, 1, 0)
+  
+  pred_factor_latih <- factor(pred_latih, levels = c(0, 1))
+  actual_factor_latih <- factor(train_data$y, levels = c(0, 1))
+  report_latih <- confusionMatrix(data = pred_factor_latih, reference = actual_factor_latih, positive = "1")
+  
+  # Output CM Teks
+  print(report_latih)
+  writeLines(capture.output(print(report_latih)), paste0("classification_report_latih", file_suffix, ".txt"))
+
+  # Heatmap CM (Latih)
+  conf_latih <- table(Actual = train_data$y, Predicted = pred_latih)
+  cm_df_latih <- as.data.frame(conf_latih)
+  colnames(cm_df_latih) <- c("Actual", "Predicted", "Count")
+
+  heatmap_latih <- ggplot(data = cm_df_latih, aes(x = Predicted, y = Actual, fill = Count)) +
+    geom_tile(color = "black") +
+    geom_text(aes(label = Count), vjust = 1, size = 6, color = "white") +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    labs(title = paste("CM Data Latih", plot_title_suffix), x = "Kelas Prediksi", y = "Kelas Aktual") +
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+  # MENAMPILKAN PLOT DI OUTPUT R/PLOT PANE
+  print(heatmap_latih)
+  ggsave(paste0("confusion_matrix_latih", file_suffix, ".png"), heatmap_latih, width = 6, height = 5)
+  tryCatch({
+    tikz(file = paste0("confusion_matrix_latih", file_suffix, ".tex"), width = 7, height = 5.5)
+    print(heatmap_latih)
+    dev.off()
+  }, error = function(e) { message(e) })
+  
+  # ROC (Latih)
+  roc_latih <- roc(response = train_data$y, predictor = prob_latih, levels = c(0, 1))
+  cat("\nAUC (Data Latih):", round(auc(roc_latih), 4), "\n")
+  
+  png(paste0("roc_curve_plot_latih", file_suffix, ".png"), width = 800, height = 600)
+  plot(roc_latih, main = "", col = "darkorange", lwd = 2, print.auc = TRUE, legacy.axes = TRUE)
+  abline(a = 0, b = 1, lty = 2, col = "red")
+  dev.off()
+  
+  cat(paste("\n--- EVALUASI SELESAI UNTUK:", file_suffix, "---\n"))
+
+}
+
+# ===================================================================
+# ===== BAGIAN 4: EKSEKUSI EVALUASI =====
+# ===================================================================
+
+# 1. EVALUASI 12 VARIABEL (Baseline)
+# Menggunakan 'train_data_12vars' dst.
+cat("\n\n===== MEMULAI EVALUASI: SEBELUM SELEKSI KORELASI (12 VAR) =====\n\n")
+generate_model_evaluation(model_formula = y ~ .,
+                          train_data = train_data_12vars,
+                          validation_data = validation_data_12vars,
+                          test_data = test_data_12vars,
+                          file_suffix = "_SEBELUM_seleksi_korelasi_12vars")
+
+
+# 2. EVALUASI 8 VARIABEL (Setelah Hapus Korelasi)
+# PENTING: Sekarang menggunakan 'train_data_logreg' (Data Scale yang sinkron dgn file asli)
+cat("\n\n===== MEMULAI EVALUASI: SETELAH SELEKSI KORELASI (8 VAR) =====\n\n")
+generate_model_evaluation(model_formula = y ~ .,
+                          train_data = train_data_logreg,  # <--- DATA BARU
+                          validation_data = val_data_logreg, # <--- DATA BARU
+                          test_data = test_data_logreg,   # <--- DATA BARU
+                          file_suffix = "_SETELAH_seleksi_korelasi_8vars")
+
+
+# 3. EVALUASI MODEL AIC (Final Model Regresi Logistik)
+cat("\n\n===== MEMULAI EVALUASI: SETELAH SELEKSI AIC (FINAL MODEL) =====\n\n")
+
+# Kita jalankan ulang Stepwise AIC di sini agar menggunakan data yang SAMA persis
+# (Untuk menjamin validitas ilmiah, AIC harus lari di data training yang sama)
+cat("Menjalankan ulang Stepwise AIC pada 'train_data_logreg'...\n")
+full_model_aic <- glm(y ~ ., data = train_data_logreg, family = binomial)
+stepwise_final <- step(full_model_aic, trace = 0)
+
+formula_final_aic <- formula(stepwise_final)
+cat("Formula AIC Terpilih:\n")
+print(formula_final_aic)
+
+generate_model_evaluation(model_formula = formula_final_aic,
+                          train_data = train_data_logreg, # <--- DATA BARU
+                          validation_data = val_data_logreg,
+                          test_data = test_data_logreg,
+                          file_suffix = "_setelah_seleksi_AIC")
+
+cat("\n\n===== SEMUA TAHAPAN SELESAI (Data untuk DT/RF sudah tersimpan) =====\n\n")
+
+```
+
+
+```{r}
+alias(full_model_aic)
+```
+```{r}
+View(train_data_logreg)
+```
+
+
+
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(full_model_aic)
+```
+```{r}
+ggplot(data_processed_8vars, aes(x=y, y=x6, fill=y)) + 
+  geom_boxplot() +
+  ggtitle("Cek Apakah x9 Memisahkan y Secara Sempurna?")
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

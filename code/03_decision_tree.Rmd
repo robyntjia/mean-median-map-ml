@@ -1,0 +1,248 @@
+---
+title: "Decision Tree"
+author: "Justin"
+date: "2025-10-30"
+output: html_document
+---
+
+---
+title: "Decision Tree Analysis"
+author: "Justin"
+date: "2025-10-30"
+output: html_document
+---
+
+```{r Decision_Tree_Model}
+# ===================================================================
+# ===== MODEL DECISION TREE (Latih:Uji:Validasi = 70:20:10) =====
+# ===================================================================
+# MAPPING:
+# 70% (Latih) -> train_data
+# 20% (Uji)   -> test_data
+# 10% (Validasi) -> validation_data (Digunakan untuk tuning)
+# ===================================================================
+
+# -------------------------------
+# 0. Load Library
+# -------------------------------
+packages <- c("rpart", "rpart.plot", "ggplot2", "pROC", "caret", "dplyr", "tikzDevice")
+cat("Mengecek dan menginstall paket yang dibutuhkan...\n")
+for(pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    cat(sprintf("Paket '%s' tidak ditemukan. Menginstall...\n", pkg))
+    install.packages(pkg, dependencies = TRUE)
+  }
+  library(pkg, character.only = TRUE)
+}
+cat("Semua paket berhasil di-load.\n\n")
+
+set.seed(123) # reproduksibilitas
+
+# -------------------------------
+# 1. LOAD DATA DARI SKRIP REGRESI LOGISTIK
+# -------------------------------
+if(file.exists("Data_Skripsi_Fixed_8vars.RData")) {
+  load("Data_Skripsi_Fixed_8vars.RData")
+  cat("SUKSES: Data berhasil dimuat dari 'Data_Skripsi_Fixed_8vars.RData'.\n")
+  cat("Menerapkan proporsi: Latih (70%), Uji (20%), Validasi (10%)\n")
+} else {
+  stop("ERROR: File 'Data_Skripsi_Fixed_8vars.RData' tidak ditemukan. \nSilakan jalankan Chunk Regresi Logistik terlebih dahulu untuk membuat file ini.")
+}
+
+# --- PENTING: Hapus Variabel x9 (Duplikat x5) ---
+# Agar konsisten dengan Regresi Logistik dan Pohon lebih bersih.
+if("x9" %in% colnames(data_train_asli)) {
+  data_train_asli$x9 <- NULL
+  data_test_asli$x9  <- NULL
+  data_val_asli$x9   <- NULL
+  cat("SUKSES: Variabel x9 telah dihapus dari dataset Decision Tree.\n")
+}
+
+train_data      <- train_data_logreg # 70%
+test_data       <- test_data_logreg  # 20%
+validation_data <- val_data_logreg   # 10%
+
+cat(sprintf("Data Latih (Train) : %d baris (70%%)\n", nrow(train_data)))
+cat(sprintf("Data Uji (Test)    : %d baris (20%%)\n", nrow(test_data)))
+cat(sprintf("Data Validasi (Val): %d baris (10%%)\n", nrow(validation_data)))
+
+
+# -------------------------------
+# 2. Pastikan Target Adalah Faktor
+# -------------------------------
+levels_y <- sort(unique(train_data$y)) 
+cat("Levels Target:", paste(levels_y, collapse=", "), "\n")
+
+train_data$y      <- factor(train_data$y, levels = levels_y)
+validation_data$y <- factor(validation_data$y, levels = levels_y)
+test_data$y       <- factor(test_data$y, levels = levels_y)
+
+
+# LANGSUNG LANJUT KE BAGIAN 3 DI BAWAH INI
+# ===================================================================
+
+# -------------------------------
+# 3. Grid Search Hyperparameter Decision Tree (3 Parameter)
+# -------------------------------
+
+# Menentukan rentang nilai parameter
+minsplit_values  <- c(50, 100, 150)
+minbucket_values <- c(25, 50, 75)
+maxdepth_values  <- c(3, 4, 5)
+
+# Siapkan dataframe untuk menyimpan hasil
+results_df <- data.frame(
+  minsplit = integer(),
+  minbucket = integer(),
+  maxdepth = integer(),
+  Accuracy = double(),
+  Precision = double(),
+  Recall = double(),
+  F1 = double()
+)
+
+cat("\nMemulai Grid Search (minsplit, minbucket, maxdepth)...\n")
+cat("Note: Kombinasi di mana minsplit < 2 * minbucket akan dilewati (tidak valid).\n\n")
+
+# Loop 3 Tingkat
+for(ms in minsplit_values){
+  for(mb in minbucket_values){
+    
+    # --- LOGIC CHECK ---
+    # Syarat split: Induk harus punya minimal 'ms' data.
+    # Syarat daun:  Anak harus punya minimal 'mb' data.
+    # Jika ms < 2 * mb, maka split tidak mungkin terjadi secara logika matematika.
+    # (Contoh: minsplit=50, minbucket=50 -> Tidak bisa membagi 50 menjadi 50 & 50)
+    if(ms < 2 * mb) {
+      next # Lewati kombinasi ini
+    }
+    
+    for(md in maxdepth_values){
+      
+      # Train pada data training
+      dt_model <- rpart(y ~ ., data=train_data, method="class",
+                        control = rpart.control(minsplit = ms, 
+                                                minbucket = mb, 
+                                                maxdepth = md, 
+                                                cp = 0))
+      
+      # Prediksi pada data validasi (Tuning)
+      pred_val <- factor(predict(dt_model, newdata=validation_data, type="class"), levels=levels_y)
+      
+      # Hitung Metrik
+      cm <- confusionMatrix(pred_val, validation_data$y, positive=as.character(levels_y[2]))
+      
+      acc  <- ifelse(is.na(cm$overall["Accuracy"]), 0, cm$overall["Accuracy"])
+      prec <- ifelse(is.na(cm$byClass["Precision"]), 0, cm$byClass["Precision"])
+      rec  <- ifelse(is.na(cm$byClass["Recall"]), 0, cm$byClass["Recall"])
+      f1   <- ifelse(is.na(cm$byClass["F1"]), 0, cm$byClass["F1"])
+
+      # Simpan Hasil
+      results_df <- rbind(results_df, data.frame(
+        minsplit = ms,
+        minbucket = mb,
+        maxdepth = md,
+        Accuracy = round(acc, 4),
+        Precision = round(prec, 4),
+        Recall = round(rec, 4),
+        F1 = round(f1, 4)
+      ))
+    }
+  }
+}
+cat("Grid Search Selesai!\n\n")
+
+# Urutkan berdasarkan F1 Score lalu Accuracy
+results_df <- results_df[order(-results_df$F1, -results_df$Accuracy), ]
+print("Hasil Grid Search (Top 5 Kombinasi):")
+print(head(results_df, 5))
+
+# Ambil parameter terbaik
+best_params <- results_df[1, ]
+cat(sprintf("\nKombinasi Terbaik:\nminsplit=%d, minbucket=%d, maxdepth=%d\nF1=%.4f, Accuracy=%.4f\n",
+            best_params$minsplit, best_params$minbucket, best_params$maxdepth, 
+            best_params$F1, best_params$Accuracy))
+
+# -------------------------------
+# 4. Latih Model Terbaik (Final Model)
+# -------------------------------
+cat("\nMelatih model terbaik menggunakan parameter optimal...\n")
+best_model <- rpart(y ~ ., data=train_data, method="class",
+                    control = rpart.control(minsplit = best_params$minsplit, 
+                                            minbucket = best_params$minbucket,
+                                            maxdepth = best_params$maxdepth, 
+                                            cp = 0))
+
+
+# ===================================================================
+# ===== FUNGSI EVALUASI (TETAP SAMA) =====
+# ===================================================================
+# ... (Bagian fungsi evaluate_model_dt tidak perlu diubah, gunakan kode sebelumnya) ...
+
+# -------------------------------
+# 5. Eksekusi Evaluasi Model Terbaik
+# -------------------------------
+evaluate_model_dt(best_model, train_data, "Train")
+evaluate_model_dt(best_model, validation_data, "Validation") 
+evaluate_model_dt(best_model, test_data, "Test")             
+
+# -------------------------------
+# 6. Visualisasi Pohon Keputusan (PNG, PDF, LaTeX)
+# -------------------------------
+cat("\n--- Visualisasi Pohon Keputusan ---\n")
+
+# Update judul agar mencakup minbucket
+plot_title <- sprintf("Pohon Keputusan (split=%d, bucket=%d, depth=%d)", 
+                      best_params$minsplit, best_params$minbucket, best_params$maxdepth)
+
+# Simpan PNG
+png("Decision_Tree_Plot.png", width=1200, height=800, res=100)
+rpart.plot(best_model, main = plot_title, box.palette = "Blues", shadow.col = "grey", 
+           roundint = FALSE, yesno = 2, extra = 1, type=2) 
+dev.off()
+
+# Simpan PDF
+pdf("Decision_Tree_Plot.pdf", width=12, height=8)
+rpart.plot(best_model, main = plot_title, box.palette = "Blues", shadow.col = "grey", 
+           roundint = FALSE, yesno = 2, extra = 1, type=2) 
+dev.off()
+
+# Simpan TeX (TikZ)
+cat("Menyimpan plot pohon keputusan sebagai 'Decision_Tree_Plot.tex'...\n")
+tryCatch({
+  tikz(file = "Decision_Tree_Plot.tex", width = 10, height = 7.5, verbose = FALSE)
+  rpart.plot(best_model, main = plot_title, box.palette = "Blues", shadow.col = "grey", 
+             roundint = FALSE, yesno = 2, extra = 1, type=2) 
+  dev.off()
+  cat("Plot .tex (TikZ) berhasil disimpan.\n")
+}, error = function(e) {
+  message("ERROR: Gagal menyimpan Decision Tree sebagai TikZ.")
+  message(e)
+  if(names(dev.cur()) == "tikz output") { dev.off() }
+})
+
+cat("Semua proses Decision Tree selesai.\n")
+```
+
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
