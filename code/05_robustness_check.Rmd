@@ -1,0 +1,220 @@
+---
+title: "Robustness check: dropping X1 and X3 from the LR / DT / RF models"
+output: html_document
+---
+
+This script addresses the reviewer-style concern (raised independently by
+HJMS and by a colleague reading the draft) that the models' predictive
+performance might substantially reflect the fact that non-boundary points
+in our dataset are generated as interval midpoints, which tend to have
+much larger denominators than the boundary points themselves — i.e. that
+$X_1$ (and to a lesser extent $X_3$) may be picking up a dataset
+construction artefact rather than a genuine dynamical signature.
+
+It refits the logistic regression, decision tree, and random forest models
+under three predictor sets — the original 8 variables, with $X_1$ dropped,
+and with both $X_1$ and $X_3$ dropped — using **the same train/validation/test
+split and the same selected hyperparameters as in the paper**, and reports
+how much predictive performance survives. It also computes a trivial
+single-threshold baseline using only $\log_{10}(X_1)$, evaluated on the
+same test split, as a sanity check on how much of the signal a naive
+denominator-only rule already captures.
+
+**Before running:** set your working directory to the folder containing
+`mean_median_dataset.csv`, e.g.
+
+```{r}
+setwd("D:/022 - Bahan Ajar Genap + Pendek 2025-2026/Penelitian dan Pengabdian Masyarakat/Mandiri/Ko Jojo & Justin/Codings")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(rpart)
+library(randomForest)
+library(pROC)
+library(dplyr)
+```
+
+## 1. Load data and reproduce the paper's train/validation/test split
+
+```{r load-and-split}
+set.seed(123)
+
+raw <- read.csv("mean_median_dataset.csv", stringsAsFactors = FALSE)
+names(raw) <- c("x1","x2","x3","x4","x5","x6","x7","x8",
+                "x9","x10","x11","x12","y")
+
+data8 <- raw[, c("x1","x3","x5","x6","x7","x9","x10","x11","y")]
+data8$y <- as.factor(data8$y)
+
+# Same stratified split as the main pipeline: stratify by y and by
+# whether x5 != x9, 70/10/20 train/validation/test, seed 123.
+data8$is_diff <- ifelse(data8$x5 != data8$x9, "Beda", "Sama")
+data8$strata_group <- interaction(data8$y, data8$is_diff)
+
+set.seed(123)
+idx_train <- createDataPartition(data8$strata_group, p = 0.7, list = FALSE)
+train_asli <- data8[idx_train, ]
+temp       <- data8[-idx_train, ]
+
+set.seed(123)
+idx_val <- createDataPartition(temp$strata_group, p = 1/3, list = FALSE)
+val_asli  <- temp[idx_val, ]
+test_asli <- temp[-idx_val, ]
+
+drop_helper_cols <- function(df) { df$is_diff <- NULL; df$strata_group <- NULL; df }
+train_asli <- drop_helper_cols(train_asli)
+val_asli   <- drop_helper_cols(val_asli)
+test_asli  <- drop_helper_cols(test_asli)
+
+cat("Train:", nrow(train_asli), "| Val:", nrow(val_asli), "| Test:", nrow(test_asli), "\n")
+```
+
+## 2. Helper functions
+
+```{r helpers}
+# Same log1p + scale preprocessing used for logistic regression only
+proses_logreg <- function(df_input) {
+  df <- df_input
+  vars_skewed <- intersect(c("x1", "x3", "x7", "x11"), names(df))
+  if (length(vars_skewed) > 0) df[vars_skewed] <- log1p(df[vars_skewed])
+  vars_x <- setdiff(names(df), "y")
+  df[vars_x] <- scale(df[vars_x])
+  as.data.frame(df)
+}
+
+metrics_from_confusion <- function(pred, actual) {
+  pred <- factor(pred, levels = c(0,1)); actual <- factor(actual, levels = c(0,1))
+  tp <- sum(pred==1 & actual==1); tn <- sum(pred==0 & actual==0)
+  fp <- sum(pred==1 & actual==0); fn <- sum(pred==0 & actual==1)
+  acc <- (tp+tn)/(tp+tn+fp+fn)
+  prec <- ifelse(tp+fp==0, NA, tp/(tp+fp))
+  rec  <- ifelse(tp+fn==0, NA, tp/(tp+fn))
+  f1   <- ifelse(is.na(prec)||is.na(rec)||(prec+rec==0), NA, 2*prec*rec/(prec+rec))
+  c(Accuracy=acc, Precision=prec, Recall=rec, F1=f1)
+}
+
+# The three predictor sets to compare
+variants <- list(
+  "Original (8 vars)" = c("x1","x3","x5","x6","x7","x9","x10","x11"),
+  "Drop X1"           = c("x3","x5","x6","x7","x9","x10","x11"),
+  "Drop X1 and X3"    = c("x5","x6","x7","x9","x10","x11")
+)
+```
+
+## 3. Refit all three models under all three variants
+
+Decision tree uses the paper's selected $(N,K,A) = (50,25,4)$; random forest
+uses the paper's selected $(P,f,K,A) = (100,4,50,5)$, i.e. `maxnodes = 2^5 = 32`.
+Hyperparameters are held fixed across variants so the comparison isolates
+the effect of removing the predictors, rather than re-optimising around them.
+
+```{r refit-all, warning=FALSE}
+results <- data.frame()
+roc_list <- list()
+
+for (vname in names(variants)) {
+  vars <- variants[[vname]]
+  cols <- c(vars, "y")
+
+  ## Logistic regression
+  tr <- proses_logreg(train_asli[, cols]); te <- proses_logreg(test_asli[, cols])
+  lr_model <- glm(y ~ ., data = tr, family = binomial)
+  lr_prob  <- predict(lr_model, newdata = te, type = "response")
+  lr_pred  <- ifelse(lr_prob >= 0.5, 1, 0)
+  lr_roc   <- roc(response = te$y, predictor = lr_prob, levels = c(0,1), quiet = TRUE)
+  m <- metrics_from_confusion(lr_pred, te$y)
+  results <- rbind(results, data.frame(Model="Logistic Regression", Variant=vname,
+                                        t(as.data.frame(m)), AUC=as.numeric(auc(lr_roc))))
+  roc_list[[paste("LR -", vname)]] <- lr_roc
+
+  ## Decision tree
+  tr_dt <- train_asli[, cols]; te_dt <- test_asli[, cols]
+  dt_model <- rpart(y ~ ., data = tr_dt, method = "class",
+                     control = rpart.control(minsplit = 50, minbucket = 25, maxdepth = 4))
+  dt_prob <- predict(dt_model, newdata = te_dt, type = "prob")[,2]
+  dt_pred <- predict(dt_model, newdata = te_dt, type = "class")
+  dt_roc  <- roc(response = te_dt$y, predictor = dt_prob, levels = c(0,1), quiet = TRUE)
+  m <- metrics_from_confusion(dt_pred, te_dt$y)
+  results <- rbind(results, data.frame(Model="Decision Tree", Variant=vname,
+                                        t(as.data.frame(m)), AUC=as.numeric(auc(dt_roc))))
+  roc_list[[paste("DT -", vname)]] <- dt_roc
+
+  ## Random forest
+  tr_rf <- train_asli[, cols]; te_rf <- test_asli[, cols]
+  rf_model <- randomForest(y ~ ., data = tr_rf, ntree = 100, mtry = min(4, length(vars)),
+                            nodesize = 50, maxnodes = 32, importance = FALSE)
+  rf_prob <- predict(rf_model, newdata = te_rf, type = "prob")[,2]
+  rf_pred <- predict(rf_model, newdata = te_rf, type = "class")
+  rf_roc  <- roc(response = te_rf$y, predictor = rf_prob, levels = c(0,1), quiet = TRUE)
+  m <- metrics_from_confusion(rf_pred, te_rf$y)
+  results <- rbind(results, data.frame(Model="Random Forest", Variant=vname,
+                                        t(as.data.frame(m)), AUC=as.numeric(auc(rf_roc))))
+  roc_list[[paste("RF -", vname)]] <- rf_roc
+}
+
+print(results, row.names = FALSE)
+```
+
+## 4. Trivial single-threshold baseline (denominator only)
+
+```{r trivial-baseline}
+log_denom_train <- log10(train_asli$x1 + 1e-10)
+log_denom_test  <- log10(test_asli$x1 + 1e-10)
+y_train <- as.numeric(as.character(train_asli$y))
+y_test  <- as.numeric(as.character(test_asli$y))
+
+cands <- seq(min(log_denom_train), max(log_denom_train), length.out = 2000)
+accs  <- sapply(cands, function(t) mean((log_denom_train <= t) == y_train))
+best_t <- cands[which.max(accs)]
+
+baseline_pred <- as.integer(log_denom_test <= best_t)
+m <- metrics_from_confusion(baseline_pred, y_test)
+cat("Trivial baseline threshold (log10 scale):", round(best_t, 3), "\n")
+print(m)
+
+results <- rbind(results, data.frame(Model="Trivial baseline (denominator only)",
+                                      Variant="log10(X1) threshold",
+                                      Accuracy=m["Accuracy"], Precision=m["Precision"],
+                                      Recall=m["Recall"], F1=m["F1"], AUC=NA))
+```
+
+## 5. Save results table (CSV)
+
+```{r save-csv}
+write.csv(results, "robustness_check_results.csv", row.names = FALSE)
+cat("Saved robustness_check_results.csv\n")
+```
+
+## 6. ROC comparison plots (PDF, one per model)
+
+```{r roc-plots}
+plot_roc_group <- function(model_prefix, filename, title) {
+  pdf(filename, width = 6, height = 6)
+  keys <- names(roc_list)[startsWith(names(roc_list), model_prefix)]
+  cols <- c("black", "firebrick", "steelblue")
+  plot(roc_list[[keys[1]]], col = cols[1], lwd = 2, main = title)
+  for (i in 2:length(keys)) {
+    plot(roc_list[[keys[i]]], col = cols[i], lwd = 2, add = TRUE)
+  }
+  legend("bottomright", legend = sub(paste0(model_prefix, " - "), "", keys),
+         col = cols[seq_along(keys)], lwd = 2, cex = 0.85)
+  dev.off()
+}
+
+plot_roc_group("LR", "roc_logistic_regression.pdf", "Logistic Regression: ROC by variant")
+plot_roc_group("DT", "roc_decision_tree.pdf", "Decision Tree: ROC by variant")
+plot_roc_group("RF", "roc_random_forest.pdf", "Random Forest: ROC by variant")
+
+cat("Saved roc_logistic_regression.pdf, roc_decision_tree.pdf, roc_random_forest.pdf\n")
+```
+
+## Summary
+
+Compare the `Accuracy` and `AUC` columns across the three `Variant` rows
+for each model in `robustness_check_results.csv`. If performance holds up
+reasonably well under "Drop X1" and "Drop X1 and X3", that is direct
+evidence against the models merely detecting the dataset-construction
+artefact. The trivial baseline row shows how much a naive
+denominator-only rule achieves on its own, for comparison.
