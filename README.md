@@ -93,4 +93,4 @@ If you use this code or dataset, please cite both the associated manuscript and 
 
 ## License
 
-This code is made available for academic reproducibility purposes. Please contact the authors for any other intended use.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details. You are free to use, modify, and distribute this code, including for purposes beyond reproducing the results in the associated paper.
